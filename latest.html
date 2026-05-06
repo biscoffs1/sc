@@ -1599,32 +1599,27 @@
                     }
                 }
 
-                const isReverted = !hasCuts && !markersChanged && finalRotation === initialRot && finalFlipped === initialFlipped;
-
-                if (isReverted) {
-                    // Do nothing - don't clear anything because we want to preserve previous commit or UI rotations
-                } else {
-                    if (!selection) {
-                        selection = {
-                            videoName: editorCurrentVideo.videoName,
-                            projectPath: editorCurrentVideo.projectPath,
-                            subfolder: editorCurrentVideo.subfolder,
-                            projectName: editorCurrentVideo.projectName,
-                            type: '', rotation: finalRotation, flipped: finalFlipped
-                        };
-                        shortcutSelections.set(key, selection);
-                    }
-                    selection.cuts = JSON.parse(JSON.stringify(editorCurrentCuts));
-                    selection.markers = JSON.parse(JSON.stringify(editorMarkers));
-                    selection.rotation = finalRotation;
-                    selection.flipped = finalFlipped;
-                    selection.fps = editorEstimatedFPS;
-
-                    // Track if it was rotated in edit mode
-                    if (markersChanged) {
-                        selection.editModeRotated = true;
-                    }
+                // Goal: New commit entirely disregards/replaces the previous one.
+                if (!selection) {
+                    selection = {
+                        videoName: editorCurrentVideo.videoName,
+                        projectPath: editorCurrentVideo.projectPath,
+                        subfolder: editorCurrentVideo.subfolder,
+                        projectName: editorCurrentVideo.projectName,
+                        type: '', rotation: finalRotation, flipped: finalFlipped
+                    };
+                    shortcutSelections.set(key, selection);
                 }
+
+                selection.cuts = JSON.parse(JSON.stringify(editorCurrentCuts));
+                selection.markers = JSON.parse(JSON.stringify(editorMarkers));
+                selection.rotation = finalRotation;
+                selection.flipped = finalFlipped;
+                selection.fps = editorEstimatedFPS;
+
+                // Track if it was rotated in edit mode in THIS session
+                // Red icon appears if it has markers or if rotation was changed from 0 in editor
+                selection.editModeRotated = (editorMarkers.length > 0);
 
                 // Close editor
                 editorModal.style.display = 'none';
@@ -3307,9 +3302,10 @@
             if (miscUpdates.size > 0) {
                 scriptLines.push('# --- Updating Misc Data (Categories & Edit Rotations) ---');
                 miscUpdates.forEach((miscMap, projectPath) => {
+                    const projectName = displayedProjects.get(projectPath) || projectPath;
+                    const res = getPSPathRes('\$BaseDir', projectPath, projectName, '');
+                    const miscFileVar = `(Join-Path -Path ${res} -ChildPath 'misc.txt')`;
                     const escapedProjectPath = escapePSString(projectPath);
-                    const projectPathVar = escapedProjectPath ? `(Join-Path -Path \"$BaseDir\" -ChildPath '${escapedProjectPath}')` : '\$BaseDir';
-                    const miscFileVar = `(Join-Path -Path ${projectPathVar} -ChildPath 'misc.txt')`;
                     
                     scriptLines.push(`\$miscData = @{`);
                     for (const [vName, data] of Object.entries(miscMap)) {
@@ -3325,9 +3321,10 @@
             if (rotationUpdates.size > 0) {
                 scriptLines.push('# --- Updating Rotation Data ---');
                 rotationUpdates.forEach((update, projectPath) => {
+                    const projectName = displayedProjects.get(projectPath) || projectPath;
+                    const res = getPSPathRes('\$BaseDir', projectPath, projectName, '');
+                    const rotationFileVar = `(Join-Path -Path ${res} -ChildPath 'rotation_data.txt')`;
                     const escapedProjectPath = escapePSString(projectPath);
-                    const projectPathVar = escapedProjectPath ? `(Join-Path -Path \"$BaseDir\" -ChildPath '${escapedProjectPath}')` : '\$BaseDir';
-                    const rotationFileVar = `(Join-Path -Path ${projectPathVar} -ChildPath 'rotation_data.txt')`;
                     
                     scriptLines.push(`\$toAdd = @{`);
                     for (const [vName, rot] of Object.entries(update.toAdd)) {
