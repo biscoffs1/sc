@@ -602,6 +602,7 @@
         .editor-cut-item { display: flex; justify-content: space-between; align-items: center; padding: 4px; border-bottom: 1px solid #333; color: #eee; }
         .editor-delete-cut-btn { cursor: pointer; color: #ff5252; font-weight: bold; }
         .editor-greenBtn { background: #43a047; border: 2px solid #2e7d32; color: #fff; padding: 8px 12px; border-radius: 6px; cursor: pointer; }
+        .red-rotation-icon { color: red; margin-right: 5px; font-weight: bold; }
     </style>
 </head>
 <body>
@@ -945,6 +946,7 @@
         let editorCurrentAppliedFlip = false;
 
         let videoCategories = new Map(); // Key: projectPath + '|' + videoName, Value: Set of category names
+        let editModeRotatedVideos = new Map(); // Key: projectPath + '|' + videoName, Value: true
         let initialVideoCategories = new Map(); // Key: projectPath + '|' + videoName, Value: Set of category names
         let projectCategories = new Map(); // Key: projectPath, Value: Set of category names
         let globalSavedCategories = new Set(JSON.parse(localStorage.getItem('globalSavedCategories') || '[]'));
@@ -1441,14 +1443,11 @@
             editorCurrentVideo = { videoName, projectPath, subfolder, projectName };
             editorFileInfo.textContent = `${videoName} (${projectPath})`;
 
-            const selection = shortcutSelections.get(key) || {};
-            editorCurrentCuts = selection.cuts ? JSON.parse(JSON.stringify(selection.cuts)) : [];
-            editorMarkers = selection.markers ? JSON.parse(JSON.stringify(selection.markers)) : [];
-            editorCurrentAppliedFlip = !!selection.flipped;
-            
-            if (editorMarkers.length === 0 && selection.rotation && selection.rotation !== "0") {
-                editorMarkers = [{ frame: 0, rotation: parseInt(selection.rotation) }];
-            }
+            // Blank slate for edit mode
+            editorCurrentCuts = [];
+            editorMarkers = [];
+            editorCurrentAppliedFlip = false;
+            editorCurrentAppliedRotation = 0;
             editorPendingCutStart = null;
             editorPendingCutEnd = null;
             editorEstimatedFPS = 30;
@@ -1603,16 +1602,7 @@
                 const isReverted = !hasCuts && !markersChanged && finalRotation === initialRot && finalFlipped === initialFlipped;
 
                 if (isReverted) {
-                    if (selection) {
-                        if (!selection.type && !selection.targetProject) {
-                            shortcutSelections.delete(key);
-                        } else {
-                            selection.cuts = [];
-                            selection.markers = [];
-                            selection.rotation = initialRot;
-                            selection.flipped = initialFlipped;
-                        }
-                    }
+                    // Do nothing - don't clear anything because we want to preserve previous commit or UI rotations
                 } else {
                     if (!selection) {
                         selection = {
@@ -1629,6 +1619,11 @@
                     selection.rotation = finalRotation;
                     selection.flipped = finalFlipped;
                     selection.fps = editorEstimatedFPS;
+
+                    // Track if it was rotated in edit mode
+                    if (markersChanged) {
+                        selection.editModeRotated = true;
+                    }
                 }
 
                 // Close editor
@@ -2338,7 +2333,16 @@
             
             const nameSpan = document.createElement('span');
             nameSpan.className = 'row-video-name';
-            nameSpan.textContent = videoName;
+
+            const isEditRotated = editModeRotatedVideos.get(key) || (shortcutSelections.has(key) && shortcutSelections.get(key).editModeRotated);
+            if (isEditRotated) {
+                const icon = document.createElement('span');
+                icon.className = 'red-rotation-icon';
+                icon.innerHTML = '&#10227;';
+                nameSpan.appendChild(icon);
+            }
+
+            nameSpan.appendChild(document.createTextNode(videoName));
             rightGroup.appendChild(nameSpan);
             bar.appendChild(rightGroup);
 
@@ -2802,15 +2806,15 @@
                 '    }',
                 '}',
                 '',
-                'function Update-CategoryData {',
-                '    param([string]\$filePath, [hashtable]\$categories)',
-                '    if (\$categories.Count -eq 0) {',
+                'function Update-MiscData {',
+                '    param([string]\$filePath, [hashtable]\$miscData)',
+                '    if (\$miscData.Count -eq 0) {',
                 '        if (Test-Path -LiteralPath "\$filePath") { Remove-Item -LiteralPath "\$filePath" }',
                 '    } else {',
                 '        \$content = @()',
-                '        foreach (\$key in \$categories.Keys) {',
-                '            if (\$categories[\$key]) {',
-                '                \$content += ("{0}:{1}" -f \$key, \$categories[\$key])',
+                '        foreach (\$key in \$miscData.Keys) {',
+                '            if (\$miscData[\$key]) {',
+                '                \$content += ("{0}|{1}" -f \$key, \$miscData[\$key])',
                 '            }',
                 '        }',
                 '        if (\$content.Count -gt 0) {',
@@ -3248,19 +3252,37 @@
                 }
             });
 
-            // --- Category Data ---
-            const categoryUpdates = new Map(); // projectPath -> { videoName: categoriesString }
+            // --- Misc Data (Categories & Edit Rotations) ---
+            const miscUpdates = new Map(); // projectPath -> { videoName: dataString }
             
             // Ensure every project folder we've loaded gets an update (to allow for full removal)
             allProjectFolders.forEach(proj => {
-                categoryUpdates.set(proj.path, {});
+                miscUpdates.set(proj.path, {});
             });
 
-            videoCategories.forEach((cats, key) => {
+            // Collect all videos that have either categories OR edit mode rotations
+            const allMiscVideos = new Set();
+            videoCategories.forEach((cats, key) => { if (cats.size > 0) allMiscVideos.add(key); });
+            editModeRotatedVideos.forEach((val, key) => { if (val) allMiscVideos.add(key); });
+            shortcutSelections.forEach((sel, key) => { if (sel.editModeRotated) allMiscVideos.add(key); });
+
+            allMiscVideos.forEach(key => {
                 const [projectPath, videoName] = key.split('|');
-                if (cats.size > 0) {
-                    if (!categoryUpdates.has(projectPath)) categoryUpdates.set(projectPath, {});
-                    categoryUpdates.get(projectPath)[videoName] = Array.from(cats).join(',');
+                if (!miscUpdates.has(projectPath)) miscUpdates.set(projectPath, {});
+
+                const cats = videoCategories.get(key);
+                const isEditRotated = editModeRotatedVideos.get(key) || (shortcutSelections.has(key) && shortcutSelections.get(key).editModeRotated);
+
+                let dataParts = [];
+                if (cats && cats.size > 0) {
+                    dataParts.push(`cats:${Array.from(cats).join(',')}`);
+                }
+                if (isEditRotated) {
+                    dataParts.push('edit_rotated:true');
+                }
+
+                if (dataParts.length > 0) {
+                    miscUpdates.get(projectPath)[videoName] = dataParts.join('|');
                 }
             });
 
@@ -3282,20 +3304,20 @@
                 }
             });
 
-            if (categoryUpdates.size > 0) {
-                scriptLines.push('# --- Updating Category Data ---');
-                categoryUpdates.forEach((catsMap, projectPath) => {
+            if (miscUpdates.size > 0) {
+                scriptLines.push('# --- Updating Misc Data (Categories & Edit Rotations) ---');
+                miscUpdates.forEach((miscMap, projectPath) => {
                     const escapedProjectPath = escapePSString(projectPath);
                     const projectPathVar = escapedProjectPath ? `(Join-Path -Path \"$BaseDir\" -ChildPath '${escapedProjectPath}')` : '\$BaseDir';
-                    const categoryFileVar = `(Join-Path -Path ${projectPathVar} -ChildPath 'categories.txt')`;
+                    const miscFileVar = `(Join-Path -Path ${projectPathVar} -ChildPath 'misc.txt')`;
                     
-                    scriptLines.push(`\$categories = @{`);
-                    for (const [vName, cats] of Object.entries(catsMap)) {
-                        scriptLines.push(`    '${escapePSString(vName)}' = '${escapePSString(cats)}'`);
+                    scriptLines.push(`\$miscData = @{`);
+                    for (const [vName, data] of Object.entries(miscMap)) {
+                        scriptLines.push(`    '${escapePSString(vName)}' = '${escapePSString(data)}'`);
                     }
                     scriptLines.push(`}`);
-                    scriptLines.push(`Update-CategoryData -filePath ${categoryFileVar} -categories \$categories`);
-                    scriptLines.push(`Write-Host "Updated categories.txt for ${escapedProjectPath || '(Root)'}"`);
+                    scriptLines.push(`Update-MiscData -filePath ${miscFileVar} -miscData \$miscData`);
+                    scriptLines.push(`Write-Host "Updated misc.txt for ${escapedProjectPath || '(Root)'}"`);
                 });
                 scriptLines.push('');
             }
@@ -3507,7 +3529,8 @@
             return key.trim().replace(/^[\\/"'\[\]]+|[\\/"'\[\]]+$/g, '').replace(/\\/g, '/').toLowerCase();
         }
 
-        async function getCategoriesData(projectHandle, projectPath) {
+        async function getMiscData(projectHandle, projectPath) {
+            // First load from categories.txt for backward compatibility
             try {
                 const handle = await projectHandle.getFileHandle('categories.txt');
                 const file = await handle.getFile();
@@ -3523,7 +3546,6 @@
                             const videoSet = videoCategories.get(key);
                             if (!projectCategories.has(projectPath)) projectCategories.set(projectPath, new Set());
                             const projectSet = projectCategories.get(projectPath);
-                            
                             cats.forEach(c => {
                                 videoSet.add(c);
                                 projectSet.add(c);
@@ -3531,6 +3553,40 @@
                             });
                             initialVideoCategories.set(key, new Set(cats));
                         }
+                    }
+                });
+            } catch (e) {}
+
+            try {
+                const handle = await projectHandle.getFileHandle('misc.txt');
+                const file = await handle.getFile();
+                const text = await file.text();
+                text.split('\n').forEach(line => {
+                    const parts = line.trim().split('|');
+                    if (parts.length >= 2) {
+                        const videoName = parts[0].trim();
+                        const key = projectPath + '|' + videoName;
+
+                        parts.slice(1).forEach(part => {
+                            if (part.startsWith('cats:')) {
+                                const cats = part.substring(5).split(',').map(c => c.trim()).filter(c => c);
+                                if (cats.length > 0) {
+                                    if (!videoCategories.has(key)) videoCategories.set(key, new Set());
+                                    const videoSet = videoCategories.get(key);
+                                    if (!projectCategories.has(projectPath)) projectCategories.set(projectPath, new Set());
+                                    const projectSet = projectCategories.get(projectPath);
+
+                                    cats.forEach(c => {
+                                        videoSet.add(c);
+                                        projectSet.add(c);
+                                        globalSavedCategories.add(c);
+                                    });
+                                    initialVideoCategories.set(key, new Set(cats));
+                                }
+                            } else if (part === 'edit_rotated:true') {
+                                editModeRotatedVideos.set(key, true);
+                            }
+                        });
                     }
                 });
                 localStorage.setItem('globalSavedCategories', JSON.stringify(Array.from(globalSavedCategories)));
@@ -3682,6 +3738,7 @@
             shortcutSelections.clear();
             initialShortcutSelections.clear();
             videoCategories.clear();
+            editModeRotatedVideos.clear();
             initialVideoCategories.clear();
             projectCategories.clear();
             thumbnailContainer.innerHTML = '';
@@ -3852,7 +3909,7 @@
             for (const project of projectFolders) {
                 try {
                     console.log(`Processing project: ${project.name} (Path: ${project.path})`);
-                    await getCategoriesData(project.handle, project.path);
+                    await getMiscData(project.handle, project.path);
                     const projectScData = await getScDataForProject(project.handle);
                     const projectRotationData = await getRotationData(project.handle);
                     
